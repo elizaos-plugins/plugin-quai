@@ -2,7 +2,8 @@
 import {
   ModelClass,
   composeContext,
-  generateObject
+  generateObject,
+  elizaLogger
 } from "@elizaos/core";
 
 // src/utils/index.ts
@@ -30,12 +31,18 @@ var getQuaiAccount = (runtime) => {
   return account;
 };
 function isTransferContent(content) {
-  const validTypes = (content.tokenAddress === null || typeof content.tokenAddress === "string") && typeof content.recipient === "string" && (typeof content.amount === "string" || typeof content.amount === "number");
+  if (!content || typeof content !== "object") {
+    return false;
+  }
+  const contentObj = content;
+  const validTypes = (contentObj.tokenAddress === null || typeof contentObj.tokenAddress === "string") && typeof contentObj.recipient === "string" && (typeof contentObj.amount === "string" || typeof contentObj.amount === "number");
   if (!validTypes) {
     return false;
   }
-  const validRecipient = content.recipient.startsWith("0x") && content.recipient.length === 42;
-  const validTokenAddress = content.tokenAddress === null || content.tokenAddress.startsWith("0x") && content.tokenAddress.length === 42;
+  const recipient = contentObj.recipient;
+  const tokenAddress = contentObj.tokenAddress;
+  const validRecipient = recipient.startsWith("0x") && recipient.length === 42;
+  const validTokenAddress = tokenAddress === null || tokenAddress.startsWith("0x") && tokenAddress.length === 42;
   return validRecipient && validTokenAddress;
 }
 
@@ -69,19 +76,16 @@ var transfer_default = {
     "SEND_QUAI",
     "PAY_ON_QUAI"
   ],
-  validate: async (runtime, message) => {
+  // eslint-disable-next-line
+  validate: async (runtime, _message) => {
     return validateSettings(runtime);
   },
   description: "MUST use this action if the user requests send a token or transfer a token, the request might be varied, but it will always be a token transfer. If the user requests a transfer of lords, use this action.",
   handler: async (runtime, message, state, _options, callback) => {
-    console.log("Starting TRANSFER_TOKEN handler...");
-    if (!state) {
-      state = await runtime.composeState(message);
-    } else {
-      state = await runtime.updateRecentMessageState(state);
-    }
+    elizaLogger.log("Starting TRANSFER_TOKEN handler...");
+    const currentState = !state ? await runtime.composeState(message) : await runtime.updateRecentMessageState(state);
     const transferContext = composeContext({
-      state,
+      state: currentState,
       template: transferTemplate
     });
     const content = await generateObject({
@@ -89,9 +93,9 @@ var transfer_default = {
       context: transferContext,
       modelClass: ModelClass.MEDIUM
     });
-    console.log("Transfer content:", content);
+    elizaLogger.debug("Transfer content:", content);
     if (!isTransferContent(content)) {
-      console.error("Invalid content for TRANSFER_TOKEN action.");
+      elizaLogger.error("Invalid content for TRANSFER_TOKEN action.");
       if (callback) {
         callback({
           text: "Not enough information to transfer tokens. Please respond with token address, recipient, and amount.",
@@ -103,35 +107,29 @@ var transfer_default = {
     try {
       const account = getQuaiAccount(runtime);
       const amount = formatUnits(content.amount, "wei");
-      var txObj = {};
-      if (content.tokenAddress) {
-      } else {
-        txObj = {
-          to: content.recipient,
-          value: amount,
-          from: account.address
-        };
-        console.log(
-          "Transferring",
-          amount,
-          "QUAI",
-          "to",
-          content.recipient
-        );
-      }
-      const tx = await account.sendTransaction(txObj);
-      console.log(
-        "Transfer completed successfully! tx: " + tx.hash
+      const txObj = content.tokenAddress ? {} : {
+        to: content.recipient,
+        value: amount,
+        from: account.address
+      };
+      elizaLogger.log(
+        "Transferring",
+        amount,
+        "QUAI",
+        "to",
+        content.recipient
       );
+      const tx = await account.sendTransaction(txObj);
+      elizaLogger.success(`Transfer completed successfully! tx: ${tx.hash}`);
       if (callback) {
         callback({
-          text: "Transfer completed successfully! tx: " + tx.hash,
+          text: `Transfer completed successfully! tx: ${tx.hash}`,
           content: {}
         });
       }
       return true;
     } catch (error) {
-      console.error("Error during token transfer:", error);
+      elizaLogger.error("Error during token transfer:", error);
       if (callback) {
         callback({
           text: `Error transferring tokens: ${error.message}`,
