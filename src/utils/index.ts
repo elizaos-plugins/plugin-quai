@@ -1,10 +1,71 @@
 import type { Content, IAgentRuntime } from "@elizaos/core";
-import { JsonRpcProvider, Wallet } from "quais";
+import { elizaLogger } from "@elizaos/core";
+import { Mnemonic, QuaiHDWallet, Wallet, parseUnits, JsonRpcProvider, type TransactionRequest, Zone } from "quais";
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+
+const WALLET_DIR = "./data";
+const WALLET_FILE = path.join(WALLET_DIR, "quai_wallet.json");
+
+export const getQuaiProvider = () => {
+    return new JsonRpcProvider(
+        'https://rpc.quai.network', undefined, { usePathing: true }
+    );
+};
+
+// Load or generate wallet
+const loadOrGenerateWallet = async (): Promise<Wallet> => {
+    const provider = getQuaiProvider();
+
+    try {
+        // Check if wallet file exists
+        const walletData = await fs.readFile(WALLET_FILE, "utf8");
+        const { privateKey } = JSON.parse(walletData);
+        // Validate private key (basic check)
+        if (!privateKey || !privateKey.startsWith("0x") || privateKey.length !== 66) {
+            throw new Error("Invalid private key format");
+        }        
+        const wallet = new Wallet(privateKey, provider);
+        elizaLogger.log("Loaded existing Quai wallet:", { address: wallet.address });
+        return wallet;
+    } catch (error) {
+        // If file doesn’t exist or is invalid, generate a new wallet
+        elizaLogger.log("No existing wallet found or error loading. Generating new wallet... ", error);
+
+        // Ensure the data directory exists
+        await fs.mkdir(WALLET_DIR, { recursive: true });
+
+        // Generate new mnemonic and wallet
+        const entropy = crypto.randomBytes(16); // 12-word mnemonic
+        const mnemonic = Mnemonic.fromEntropy(entropy);
+        const hdWallet = QuaiHDWallet.fromMnemonic(mnemonic);
+        const cyprus1Address = await hdWallet.getNextAddress(0, Zone.Cyprus1); // get the first address in the Cyrpus1 zone
+        const key = hdWallet.getPrivateKey(cyprus1Address.address); // get the private key for the address in the Cyprus1 zone
+        const wallet = new Wallet(key, provider);
+
+        // Save to disk
+        const walletData = JSON.stringify({
+            privateKey: wallet.privateKey,
+            address: wallet.address,
+            createdAt: new Date().toISOString(),
+        }, null, 2);
+        await fs.writeFile(WALLET_FILE, walletData, "utf8");
+
+        elizaLogger.log("Generated and saved new Quai wallet:", {
+            address: wallet.address,
+        });
+
+        return wallet;
+    }
+};
+
+// Initialize wallet (runs once when plugin loads)
+const walletPromise = loadOrGenerateWallet();
 
 export const validateSettings = (runtime: IAgentRuntime) => {
     const requiredSettings = [
         "QUAI_PRIVATE_KEY",
-        "QUAI_RPC_URL",
     ];
 
     for (const setting of requiredSettings) {
@@ -16,24 +77,18 @@ export const validateSettings = (runtime: IAgentRuntime) => {
     return true;
 };
 
-export const getQuaiProvider = (runtime: IAgentRuntime) => {
-    return new JsonRpcProvider(
-        runtime.getSetting("QUAI_RPC_URL"),
-    );
-};
-
-export const getQuaiAccount = (runtime: IAgentRuntime) => {
-    const provider = getQuaiProvider(runtime);
-    const account = new Wallet(runtime.getSetting("QUAI_PRIVATE_KEY"), provider);
+export const getQuaiAccount = async () => {
+    const account = await walletPromise;
     return account;
 };
 
+// Define transfer content interface for native QUAI
 export interface TransferContent extends Content {
-    tokenAddress: string;
     recipient: string;
     amount: string | number;
 }
 
+// Validate transfer content
 export function isTransferContent(
     content: unknown
 ): content is TransferContent {
@@ -41,11 +96,10 @@ export function isTransferContent(
         return false;
     }
     
-    const contentObj = content as { tokenAddress?: unknown; recipient?: unknown; amount?: unknown };
+    const contentObj = content as { recipient?: unknown; amount?: unknown };
     
     // Validate types
     const validTypes =
-        (contentObj.tokenAddress === null || typeof contentObj.tokenAddress === "string") &&
         typeof contentObj.recipient === "string" &&
         (typeof contentObj.amount === "string" ||
             typeof contentObj.amount === "number");
@@ -53,44 +107,11 @@ export function isTransferContent(
         return false;
     }
 
-    // Validate addresses (20-bytes with 0x prefix)
+    // Validate recipient address (20-bytes with 0x prefix)
     const recipient = contentObj.recipient as string;
-    const tokenAddress = contentObj.tokenAddress as string | null;
-
     const validRecipient =
         recipient.startsWith("0x") &&
         recipient.length === 42;
 
-    // If tokenAddress is provided, validate it
-    const validTokenAddress = tokenAddress === null ||
-        (tokenAddress.startsWith("0x") &&
-        tokenAddress.length === 42);
-
-    return validRecipient && validTokenAddress;
+    return validRecipient;
 }
-
-// export function isTransferContent(
-//     content: any
-// ): content is TransferContent {
-//     // Validate types
-//     const validTypes =
-//         (content.tokenAddress === null || typeof content.tokenAddress === "string") &&
-//         typeof content.recipient === "string" &&
-//         (typeof content.amount === "string" ||
-//             typeof content.amount === "number");
-//     if (!validTypes) {
-//         return false;
-//     }
-
-//     // Validate addresses (20-bytes with 0x prefix)
-//     const validRecipient =
-//         content.recipient.startsWith("0x") &&
-//         content.recipient.length === 42;
-
-//     // If tokenAddress is provided, validate it
-//     const validTokenAddress = content.tokenAddress === null ||
-//         (content.tokenAddress.startsWith("0x") &&
-//         content.tokenAddress.length === 42);
-
-//     return validRecipient && validTokenAddress;
-

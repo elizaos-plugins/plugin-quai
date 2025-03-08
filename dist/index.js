@@ -3,15 +3,60 @@ import {
   ModelClass,
   composeContext,
   generateObject,
-  elizaLogger
+  elizaLogger as elizaLogger2
 } from "@elizaos/core";
 
 // src/utils/index.ts
-import { JsonRpcProvider, Wallet } from "quais";
+import { elizaLogger } from "@elizaos/core";
+import { Mnemonic, QuaiHDWallet, Wallet, JsonRpcProvider, Zone } from "quais";
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+var WALLET_DIR = "./data";
+var WALLET_FILE = path.join(WALLET_DIR, "quai_wallet.json");
+var getQuaiProvider = () => {
+  return new JsonRpcProvider(
+    "https://rpc.quai.network",
+    void 0,
+    { usePathing: true }
+  );
+};
+var loadOrGenerateWallet = async () => {
+  const provider = getQuaiProvider();
+  try {
+    const walletData = await fs.readFile(WALLET_FILE, "utf8");
+    const { privateKey } = JSON.parse(walletData);
+    if (!privateKey || !privateKey.startsWith("0x") || privateKey.length !== 66) {
+      throw new Error("Invalid private key format");
+    }
+    const wallet = new Wallet(privateKey, provider);
+    elizaLogger.log("Loaded existing Quai wallet:", { address: wallet.address });
+    return wallet;
+  } catch (error) {
+    elizaLogger.log("No existing wallet found or error loading. Generating new wallet... ", error);
+    await fs.mkdir(WALLET_DIR, { recursive: true });
+    const entropy = crypto.randomBytes(16);
+    const mnemonic = Mnemonic.fromEntropy(entropy);
+    const hdWallet = QuaiHDWallet.fromMnemonic(mnemonic);
+    const cyprus1Address = await hdWallet.getNextAddress(0, Zone.Cyprus1);
+    const key = hdWallet.getPrivateKey(cyprus1Address.address);
+    const wallet = new Wallet(key, provider);
+    const walletData = JSON.stringify({
+      privateKey: wallet.privateKey,
+      address: wallet.address,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    }, null, 2);
+    await fs.writeFile(WALLET_FILE, walletData, "utf8");
+    elizaLogger.log("Generated and saved new Quai wallet:", {
+      address: wallet.address
+    });
+    return wallet;
+  }
+};
+var walletPromise = loadOrGenerateWallet();
 var validateSettings = (runtime) => {
   const requiredSettings = [
-    "QUAI_PRIVATE_KEY",
-    "QUAI_RPC_URL"
+    "QUAI_PRIVATE_KEY"
   ];
   for (const setting of requiredSettings) {
     if (!runtime.getSetting(setting)) {
@@ -20,14 +65,8 @@ var validateSettings = (runtime) => {
   }
   return true;
 };
-var getQuaiProvider = (runtime) => {
-  return new JsonRpcProvider(
-    runtime.getSetting("QUAI_RPC_URL")
-  );
-};
-var getQuaiAccount = (runtime) => {
-  const provider = getQuaiProvider(runtime);
-  const account = new Wallet(runtime.getSetting("QUAI_PRIVATE_KEY"), provider);
+var getQuaiAccount = async () => {
+  const account = await walletPromise;
   return account;
 };
 function isTransferContent(content) {
@@ -35,25 +74,23 @@ function isTransferContent(content) {
     return false;
   }
   const contentObj = content;
-  const validTypes = (contentObj.tokenAddress === null || typeof contentObj.tokenAddress === "string") && typeof contentObj.recipient === "string" && (typeof contentObj.amount === "string" || typeof contentObj.amount === "number");
+  const validTypes = typeof contentObj.recipient === "string" && (typeof contentObj.amount === "string" || typeof contentObj.amount === "number");
   if (!validTypes) {
     return false;
   }
   const recipient = contentObj.recipient;
-  const tokenAddress = contentObj.tokenAddress;
   const validRecipient = recipient.startsWith("0x") && recipient.length === 42;
-  const validTokenAddress = tokenAddress === null || tokenAddress.startsWith("0x") && tokenAddress.length === 42;
-  return validRecipient && validTokenAddress;
+  return validRecipient;
 }
 
 // src/actions/transfer.ts
-import { formatUnits } from "quais";
-var transferTemplate = `Respond with a JSON markdown block containing only the extracted values. Use null for any values that cannot be determined.
+import { getAddress, isQuaiAddress, parseUnits as parseUnits2 } from "quais";
+elizaLogger2.debug("Loaded Quai plugin actions.");
+var transferTemplate = `Respond with a JSON markdown block containing only the extracted values.
 
 Example response:
 \`\`\`json
 {
-    "tokenAddress": "0x49d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
     "recipient": "0x0005C06bD1339c79700a8DAb35DE0a1b61dFBD71",
     "amount": "0.001"
 }
@@ -61,28 +98,47 @@ Example response:
 
 {{recentMessages}}
 
-Given the recent messages, extract the following information about the requested token transfer:
-- Token contract address (if available)
+Given the recent messages, extract the following information about the requested QUAI transfer:
 - Recipient wallet address
-- Amount to send
+- Amount to send in QUAI
 
 Respond with a JSON markdown block containing only the extracted values.`;
-var transfer_default = {
-  name: "SEND_TOKEN",
+var sendQuaiAction = {
+  name: "SEND_QUAI",
   similes: [
-    "TRANSFER_TOKEN_ON_QUAI",
-    "TRANSFER_TOKENS_ON_QUAI",
-    "SEND_TOKENS_ON_QUAI",
-    "SEND_QUAI",
-    "PAY_ON_QUAI"
+    "TRANSFER_QUAI",
+    // Existing: General transfer intent
+    "SEND_NATIVE_QUAI",
+    // Existing: Native Quai specificity
+    "PAY_WITH_QUAI",
+    // Existing: Payment connotation
+    "SEND_QUAI_FROM_AGENT",
+    // Clarifies agent as sender
+    "TRANSFER_QUAI_TO_ADDRESS",
+    // Emphasizes destination
+    "GIVE_QUAI_TO_RECIPIENT",
+    // Casual giving intent
+    "MOVE_QUAI_TO_WALLET",
+    // Movement phrasing
+    "DISPATCH_QUAI",
+    // Dispatch/send intent
+    "FORWARD_QUAI",
+    // Forwarding connotation
+    "SEND_QUAI_PAYMENT",
+    // Payment-specific sending
+    "TRANSFER_CRYPTO_QUAI",
+    // Broader crypto context
+    "EXECUTE_QUAI_TRANSFER",
+    // Formal execution intent
+    "SEND_QUAI_TO_USER"
+    // User-specific sending
   ],
-  // eslint-disable-next-line
   validate: async (runtime, _message) => {
     return validateSettings(runtime);
   },
-  description: "MUST use this action if the user requests send a token or transfer a token, the request might be varied, but it will always be a token transfer. If the user requests a transfer of lords, use this action.",
+  description: "MUST use this action if the user requests the agent to send or transfer native QUAI to a specified address.",
   handler: async (runtime, message, state, _options, callback) => {
-    elizaLogger.log("Starting TRANSFER_TOKEN handler...");
+    elizaLogger2.log("Starting SEND_QUAI handler...");
     const currentState = !state ? await runtime.composeState(message) : await runtime.updateRecentMessageState(state);
     const transferContext = composeContext({
       state: currentState,
@@ -93,46 +149,155 @@ var transfer_default = {
       context: transferContext,
       modelClass: ModelClass.MEDIUM
     });
-    elizaLogger.debug("Transfer content:", content);
+    elizaLogger2.debug("Transfer content:", content);
     if (!isTransferContent(content)) {
-      elizaLogger.error("Invalid content for TRANSFER_TOKEN action.");
+      elizaLogger2.error("Invalid content for SEND_QUAI action.");
       if (callback) {
         callback({
-          text: "Not enough information to transfer tokens. Please respond with token address, recipient, and amount.",
+          text: "Not enough information to transfer QUAI. Please provide recipient and amount.",
           content: { error: "Invalid transfer content" }
         });
       }
       return false;
     }
     try {
-      const account = getQuaiAccount(runtime);
-      const amount = formatUnits(content.amount, "wei");
-      const txObj = content.tokenAddress ? {} : {
-        to: content.recipient,
-        value: amount,
+      const account = await getQuaiAccount();
+      const amountInWei = parseUnits2(content.amount.toString(), 18);
+      if (getAddress(content.recipient) === null || isQuaiAddress(getAddress(content.recipient)) === false) {
+        elizaLogger2.error("Invalid recipient address: ", content.recipient);
+        if (callback) {
+          callback({
+            text: `Invalid recipient address: ${content.recipient}`,
+            content: { error: "Invalid recipient address" }
+          });
+        }
+      }
+      const txObj = {
+        to: getAddress(content.recipient),
+        value: amountInWei,
         from: account.address
       };
-      elizaLogger.log(
+      elizaLogger2.log(
         "Transferring",
-        amount,
+        content.amount,
         "QUAI",
         "to",
         content.recipient
       );
       const tx = await account.sendTransaction(txObj);
-      elizaLogger.success(`Transfer completed successfully! tx: ${tx.hash}`);
+      const receipt = await tx.wait();
+      if ("status" in receipt && receipt.status === 1) {
+        elizaLogger2.success(`Transfer completed successfully! tx: ${tx.hash}`);
+        if (callback) {
+          callback({
+            text: `Transfer completed successfully! tx: ${tx.hash}`,
+            content: {}
+          });
+        }
+        return true;
+      } else {
+        elizaLogger2.error("Transaction failed:", receipt);
+        if (callback) {
+          callback({
+            text: `Transfer failed. Transaction hash: ${tx.hash}`,
+            content: { error: "Transaction failed" }
+          });
+        }
+        return false;
+      }
+    } catch (error) {
+      elizaLogger2.error("Error during QUAI transfer:", error);
       if (callback) {
         callback({
-          text: `Transfer completed successfully! tx: ${tx.hash}`,
-          content: {}
+          text: `Error transferring QUAI: ${error.message}`,
+          content: { error: error.message }
+        });
+      }
+      return false;
+    }
+  },
+  examples: [
+    [
+      { user: "{{user1}}", content: { text: "Send 10 QUAI to 0x009d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7" } },
+      { user: "{{agent}}", content: { text: "transferring 10 quai to that address now. hold tight." } }
+    ],
+    [
+      { user: "{{user1}}", content: { text: "Please send 0.5 QUAI to 0x00fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac" } },
+      { user: "{{agent}}", content: { text: "got it. sending 0.5 quai to that address. will confirm when it\u2019s done." } }
+    ],
+    [
+      { user: "{{user2}}", content: { text: "Transfer 2 QUAI to 0x0034..." } },
+      { user: "{{agent}}", content: { text: "moving 2 quai to 0x0034... as we speak." } }
+    ],
+    [
+      { user: "{{user3}}", content: { text: "Pay 1 QUAI to 0x0078..." } },
+      { user: "{{agent}}", content: { text: "paying 1 quai to 0x0078... let\u2019s make it happen." } }
+    ],
+    [
+      { user: "{{user4}}", content: { text: "Give 5 QUAI to 0x00bc..." } },
+      { user: "{{agent}}", content: { text: "handing over 5 quai to 0x00bc... consider it done." } }
+    ],
+    [
+      { user: "{{user5}}", content: { text: "Send 0.1 QUAI to my friend at 0x00f0..." } },
+      { user: "{{agent}}", content: { text: "sending 0.1 quai to your friend\u2019s wallet at 0x00f0... should be there soon." } }
+    ],
+    [
+      { user: "{{user6}}", content: { text: "Move 3 QUAI to 0x00ed..." } },
+      { user: "{{agent}}", content: { text: "shifting 3 quai to 0x00ed... on its way." } }
+    ]
+  ]
+};
+var receiveQuaiAction = {
+  name: "RECEIVE_QUAI",
+  similes: [
+    "SEND_QUAI_TO_AGENT",
+    // Existing: Direct sending to agent
+    "TRANSFER_QUAI_TO_AGENT",
+    // Existing: Transfer phrasing
+    "GIVE_QUAI_TO_AGENT",
+    // Existing: Giving connotation
+    "SEND_QUAI_TO_ME",
+    // Matches "send Quai to me" flipped
+    "PROVIDE_QUAI_ADDRESS",
+    // Intent to get address for sending
+    "RECEIVE_QUAI_FROM_USER",
+    // Reverse perspective
+    "SHARE_QUAI_WALLET",
+    // Sharing wallet for receiving
+    "ACCEPT_QUAI_PAYMENT",
+    // Accepting Quai
+    "GET_QUAI_FROM_YOU",
+    // User offering Quai
+    "DEPOSIT_QUAI_TO_AGENT",
+    // Depositing to agent
+    "QUAI_TO_AGENT_WALLET",
+    // Broad Quai-to-agent intent
+    "SEND_CRYPTO_TO_AGENT",
+    // Broader crypto context
+    "I_WANT_TO_SEND_QUAI"
+    // Matches your exact input intent
+  ],
+  validate: async (runtime, _message) => {
+    return validateSettings(runtime);
+  },
+  description: "Triggers when the user wants to send Quai to the agent or requests the agent's Quai wallet address.",
+  handler: async (runtime, message, state, _options, callback) => {
+    elizaLogger2.log("Starting RECEIVE_QUAI handler...");
+    try {
+      const account = await getQuaiAccount();
+      const agentAddress = account.address;
+      if (callback) {
+        callback({
+          text: `To send Quai to me, please use the following address: ${agentAddress}. Make sure to double-check the address before sending.`,
+          content: { address: agentAddress }
         });
       }
       return true;
     } catch (error) {
-      elizaLogger.error("Error during token transfer:", error);
+      elizaLogger2.error("Error in RECEIVE_QUAI action:", error);
       if (callback) {
         callback({
-          text: `Error transferring tokens: ${error.message}`,
+          text: "There was an error retrieving my address. Please try again later.",
           content: { error: error.message }
         });
       }
@@ -143,29 +308,51 @@ var transfer_default = {
     [
       {
         user: "{{user1}}",
-        content: {
-          text: "Send 10 QUAI to 0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7"
-        }
+        content: { text: "I want to send you some Quai. What's your address?" }
       },
       {
         user: "{{agent}}",
-        content: {
-          text: "I'll transfer 10 QUAI to that address right away. Let me process that for you."
-        }
+        content: { text: "to send me quai, use this address: 0xAgentAddressHere" }
       }
     ],
     [
       {
-        user: "{{user1}}",
-        content: {
-          text: "Please send 0.5 QUAI to 0x03fe2b97c1fd336e750087d68b9b867997fd64a2661ff3ca5a7c771641e8e7ac"
-        }
+        user: "{{user2}}",
+        content: { text: "Can I send you Quai? Please provide your address." }
       },
       {
         user: "{{agent}}",
-        content: {
-          text: "Got it, initiating transfer of 0.5 QUAI to the provided address. I'll confirm once it's complete."
-        }
+        content: { text: "to send me quai, use this address: 0xAgentAddressHere" }
+      }
+    ],
+    [
+      {
+        user: "{{user3}}",
+        content: { text: "I would like to send you QUAI" }
+      },
+      {
+        user: "{{agent}}",
+        content: { text: "to send me quai, use this address: 0xAgentAddressHere" }
+      }
+    ],
+    [
+      {
+        user: "{{user4}}",
+        content: { text: "Send you QUAI" }
+      },
+      {
+        user: "{{agent}}",
+        content: { text: "to send me quai, use this address: 0xAgentAddressHere" }
+      }
+    ],
+    [
+      {
+        user: "{{user5}}",
+        content: { text: "What\u2019s your QUAI address?" }
+      },
+      {
+        user: "{{agent}}",
+        content: { text: "to send me quai, use this address: 0xAgentAddressHere" }
       }
     ]
   ]
@@ -175,7 +362,7 @@ var transfer_default = {
 var quaiPlugin = {
   name: "quai",
   description: "Quai Plugin for Eliza",
-  actions: [transfer_default],
+  actions: [sendQuaiAction, receiveQuaiAction],
   evaluators: [],
   providers: []
 };
